@@ -8,11 +8,6 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 import pandas as pd
-from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, START, StateGraph
 
 from biomni.config import default_config
 from biomni.llm import SourceType, get_llm
@@ -41,6 +36,12 @@ from biomni.utils import (
     should_skip_message,
     textify_api_dict,
 )
+from dotenv import load_dotenv
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+
 
 if os.path.exists(".env"):
     load_dotenv(".env", override=False)
@@ -64,6 +65,8 @@ class A1:
         api_key: str | None = None,
         commercial_mode: bool | None = None,
         expected_data_lake_files: list | None = None,
+        resource_indices: dict | None = None,
+        proposer_mode: bool | None = None,
     ):
         """Initialize the biomni agent.
 
@@ -204,9 +207,11 @@ class A1:
         if self.use_tool_retriever:
             self.tool_registry = ToolRegistry(module2api)
             self.retriever = ToolRetriever()
+            self.resource_indices = resource_indices
 
         # Add timeout parameter
         self.timeout_seconds = timeout_seconds  # 10 minutes default timeout
+        self.proposer_mode = bool(proposer_mode)
         self.configure()
 
     def add_tool(self, api):
@@ -1139,8 +1144,9 @@ IMPORTANT: The following custom resources have been specifically added for your 
             prompt_modifier += """===============================
 """
 
-        # Add environment resources
-        prompt_modifier += """
+        if tool_desc or data_lake_content or library_content_list:
+            # Add environment resources
+            prompt_modifier += """
 
 Environment Resources:
 
@@ -1170,49 +1176,55 @@ Each library is listed with its description to help you understand its functiona
 - Note on using R packages and Bash scripts:
   - R packages: Use subprocess.run(['Rscript', '-e', 'your R code here']) in Python, or use the #!R marker in your execute block.
   - Bash scripts and commands: Use the #!BASH marker in your execute block for both simple commands and complex shell scripts with variables, loops, conditionals, etc.
-        """
+            """
 
-        # Set appropriate text based on whether this is initial configuration or after retrieval
-        if is_retrieval:
-            function_intro = "Based on your query, I've identified the following most relevant functions that you can use in your code:"
-            data_lake_intro = "Based on your query, I've identified the following most relevant datasets:"
-            library_intro = (
-                "Based on your query, I've identified the following most relevant libraries that you can use:"
-            )
-            import_instruction = "IMPORTANT: When using any function, you MUST first import it from its module. For example:\nfrom [module_name] import [function_name]"
+            # Set appropriate text based on whether this is initial configuration or after retrieval
+            if is_retrieval:
+                function_intro = "Based on your query, I've identified the following most relevant functions that you can use in your code:"
+                data_lake_intro = "Based on your query, I've identified the following most relevant datasets:"
+                library_intro = (
+                    "Based on your query, I've identified the following most relevant libraries that you can use:"
+                )
+                import_instruction = "IMPORTANT: When using any function, you MUST first import it from its module. For example:\nfrom [module_name] import [function_name]"
+            else:
+                function_intro = "In your code, you will need to import the function location using the following dictionary of functions:"
+                data_lake_intro = "You can write code to understand the data, process and utilize it for the task. Here is the list of datasets:"
+                library_intro = "The environment supports a list of libraries that can be directly used. Do not forget the import statement:"
+                import_instruction = ""
+
+            # Format the content consistently for both initial and retrieval cases
+            library_content_formatted = "\n".join(libraries_formatted)
+            data_lake_content_formatted = "\n".join(data_lake_formatted)
+
+            # Format the prompt with the appropriate values
+            format_dict = {
+                "function_intro": function_intro,
+                "tool_desc": textify_api_dict(tool_desc) if isinstance(tool_desc, dict) else tool_desc,
+                "import_instruction": import_instruction,
+                "data_lake_path": self.path + "/data_lake",
+                "data_lake_intro": data_lake_intro,
+                "data_lake_content": data_lake_content_formatted,
+                "library_intro": library_intro,
+                "library_content_formatted": library_content_formatted,
+            }
+
+            # Add custom resources to format dict if they exist
+            if custom_tools_formatted:
+                format_dict["custom_tools"] = "\n".join(custom_tools_formatted)
+            if custom_data_formatted:
+                format_dict["custom_data"] = "\n".join(custom_data_formatted)
+            if custom_software_formatted:
+                format_dict["custom_software"] = "\n".join(custom_software_formatted)
+
+            formatted_prompt = prompt_modifier.format(**format_dict)
+
         else:
-            function_intro = "In your code, you will need to import the function location using the following dictionary of functions:"
-            data_lake_intro = "You can write code to understand the data, process and utilize it for the task. Here is the list of datasets:"
-            library_intro = "The environment supports a list of libraries that can be directly used. Do not forget the import statement:"
-            import_instruction = ""
+            formatted_prompt = prompt_modifier
 
-        # Format the content consistently for both initial and retrieval cases
-        library_content_formatted = "\n".join(libraries_formatted)
-        data_lake_content_formatted = "\n".join(data_lake_formatted)
+        if "gpt-oss" in self.llm.model_name:
+            formatted_prompt += "\nReasoning: high"
 
-        # Format the prompt with the appropriate values
-        format_dict = {
-            "function_intro": function_intro,
-            "tool_desc": textify_api_dict(tool_desc) if isinstance(tool_desc, dict) else tool_desc,
-            "import_instruction": import_instruction,
-            "data_lake_path": self.path + "/data_lake",
-            "data_lake_intro": data_lake_intro,
-            "data_lake_content": data_lake_content_formatted,
-            "library_intro": library_intro,
-            "library_content_formatted": library_content_formatted,
-        }
-
-        # Add custom resources to format dict if they exist
-        if custom_tools_formatted:
-            format_dict["custom_tools"] = "\n".join(custom_tools_formatted)
-        if custom_data_formatted:
-            format_dict["custom_data"] = "\n".join(custom_data_formatted)
-        if custom_software_formatted:
-            format_dict["custom_software"] = "\n".join(custom_software_formatted)
-
-        formatted_prompt = prompt_modifier.format(**format_dict)
-
-        return formatted_prompt
+        return formatted_prompt.strip()
 
     def configure(self, self_critic=False, test_time_scale_round=0):
         """Configure the agent with the initial system prompt and workflow.
@@ -1295,6 +1307,20 @@ Each library is listed with its description to help you understand its functiona
             # Parse the response
             msg = str(response.content)
 
+            # if self.proposer_mode:
+            #     message_is_meaningful = bool(re.search(r"[A-Za-z0-9]", msg))
+            #     if not message_is_meaningful:
+            #         # Skip empty or meaningless messages
+            #         # Try to correct it with encouragement
+            #         state["messages"].append(HumanMessage(content="Please, continue with either further reasoning ."))
+            #         state["next_step"] = "generate"
+            #         return state
+
+            #     valid_tags = ["<execute>", "<solution>", "<think>"]
+            #     if all(tag not in msg for tag in valid_tags):
+            #         # Add <think> tag to a plain message
+            #         msg = "<think>" + msg
+
             # Check for incomplete tags and fix them
             if "<execute>" in msg and "</execute>" not in msg:
                 msg += "</execute>"
@@ -1306,6 +1332,8 @@ Each library is listed with its description to help you understand its functiona
             think_match = re.search(r"<think>(.*?)</think>", msg, re.DOTALL)
             execute_match = re.search(r"<execute>(.*?)</execute>", msg, re.DOTALL)
             answer_match = re.search(r"<solution>(.*?)</solution>", msg, re.DOTALL)
+
+            # print("DEBUG GENERATE:", msg)
 
             # Add the message to the state before checking for errors
             state["messages"].append(AIMessage(content=msg.strip()))
@@ -1423,7 +1451,9 @@ Each library is listed with its description to help you understand its functiona
                 self._execution_results.append(execution_entry)
 
                 observation = f"\n<observation>{result}</observation>"
-                state["messages"].append(AIMessage(content=observation.strip()))
+                content = observation.strip()
+                message = HumanMessage(content=content) if self.proposer_mode else AIMessage(content=content)
+                state["messages"].append(message)
 
             return state
 
@@ -1570,8 +1600,12 @@ Each library is listed with its description to help you understand its functiona
         }
 
         # Use prompt-based retrieval with the agent's LLM
-        selected_resources = self.retriever.prompt_based_retrieval(prompt, resources, llm=self.llm)
-        print("Using prompt-based retrieval with the agent's LLM")
+        if self.resource_indices is not None:
+            selected_resources = self.retriever.retrieve_by_indices(resources, self.resource_indices)
+            print("Using pre-selected retrieval (no LLM)")
+        else:
+            selected_resources = self.retriever.prompt_based_retrieval(prompt, resources, llm=self.llm)
+            print("Using prompt-based retrieval with the agent's LLM")
 
         # Extract the names from the selected resources for the system prompt
         selected_resources_names = {
@@ -1890,6 +1924,22 @@ Each library is listed with its description to help you understand its functiona
 
         print(f"Created MCP server with {registered_tools} tools")
         return mcp
+
+    def get_full_trajectory(self) -> list[dict]:
+        """Get the full trajectory of the agent's execution.
+
+        Returns:
+            List of dictionaries containing the full trajectory of the agent's execution
+        """
+        conversation_state = getattr(self, "_conversation_state", None)
+
+        if not (conversation_state and hasattr(conversation_state, "get") and "messages" in conversation_state):
+            raise ValueError("Conversation state is not available")
+
+        trajectory = [{"type": "system", "content": self.system_prompt}]
+        for message in self._normalize_conversation_state_messages(conversation_state["messages"]):
+            trajectory.append({"type": message["type"], "content": message["content"]})
+        return trajectory
 
     def save_conversation_history(self, filepath: str, include_images: bool = True, save_pdf: bool = True) -> None:
         """Save the complete conversation history as PDF only.

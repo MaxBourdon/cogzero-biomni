@@ -11,6 +11,32 @@ class ToolRetriever:
     def __init__(self):
         pass
 
+    def retrieve_by_indices(
+        self,
+        resources: dict,
+        selected_indices: dict | None = None,
+    ) -> dict:
+        """Return selected resources by their indices."""
+        selected_indices = selected_indices or {}
+
+        selected_resources = {
+            "tools": [
+                resources["tools"][i] for i in selected_indices.get("tools", []) if i < len(resources.get("tools", []))
+            ],
+            "data_lake": [
+                resources["data_lake"][i]
+                for i in selected_indices.get("data_lake", [])
+                if i < len(resources.get("data_lake", []))
+            ],
+            "libraries": [
+                resources["libraries"][i]
+                for i in selected_indices.get("libraries", [])
+                if i < len(resources.get("libraries", []))
+            ],
+        }
+
+        return selected_resources
+
     def prompt_based_retrieval(self, query: str, resources: dict, llm=None) -> dict:
         """Use a prompt-based approach to retrieve the most relevant resources for a query.
 
@@ -83,23 +109,7 @@ IMPORTANT GUIDELINES:
         selected_indices = self._parse_llm_response(response_content)
 
         # Get the selected resources
-        selected_resources = {
-            "tools": [
-                resources["tools"][i] for i in selected_indices.get("tools", []) if i < len(resources.get("tools", []))
-            ],
-            "data_lake": [
-                resources["data_lake"][i]
-                for i in selected_indices.get("data_lake", [])
-                if i < len(resources.get("data_lake", []))
-            ],
-            "libraries": [
-                resources["libraries"][i]
-                for i in selected_indices.get("libraries", [])
-                if i < len(resources.get("libraries", []))
-            ],
-        }
-
-        return selected_resources
+        return self.retrieve_by_indices(resources, selected_indices)
 
     def _format_resources_for_prompt(self, resources: list) -> str:
         """Format resources for inclusion in the prompt."""
@@ -129,7 +139,9 @@ IMPORTANT GUIDELINES:
         tools_match = re.search(r"TOOLS:\s*\[(.*?)\]", response, re.IGNORECASE)
         if tools_match and tools_match.group(1).strip():
             with contextlib.suppress(ValueError):
-                selected_indices["tools"] = [int(idx.strip()) for idx in tools_match.group(1).split(",") if idx.strip()]
+                selected_indices["tools"] = [
+                    int(idx.strip()) for idx in tools_match.group(1).split(",") if idx.strip()
+                ]
 
         data_lake_match = re.search(r"DATA_LAKE:\s*\[(.*?)\]", response, re.IGNORECASE)
         if data_lake_match and data_lake_match.group(1).strip():
